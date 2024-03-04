@@ -1,0 +1,176 @@
+from PySide2 import QtWidgets, QtCore
+from fx import Action, selection, status, io_modules, Shape, activeProject, addAction
+import datetime
+import os
+from PySide2.QtWidgets import QInputDialog
+
+class ExportType:
+    SEPARATE_LAYERS = 0
+    SINGLE_FILE = 1
+
+class ShapeManager:
+    def __init__(self):
+        self.shapes = []
+
+    def add(self, shape):
+        self.shapes.append(shape)
+
+def GetProjectPath():
+    p = activeProject()
+    return p.bundlePath if p else None
+
+def GetPreRenderFolder(project_path):
+    if project_path:
+        project_folder = os.path.dirname(project_path)
+        workfile_folder = os.path.dirname(project_folder)
+        return os.path.abspath(os.path.join(workfile_folder, "..", "pre_render"))
+    else:
+        return None
+
+class ExportSilhouetteShapes(Action):
+    """Export Silhouette shapes automation"""
+
+    def __init__(self):
+        Action.__init__(self, "KarthickOptions|Export Silhouette Shapes Automation")
+        self.counter = 0
+        self.path = None  # Will be set during execution
+        self.export_type = ExportType.SEPARATE_LAYERS  # Default export type
+
+        # Assuming fx and io_modules are defined elsewhere
+        self.get_widgets()  # Call your existing get_widgets method
+
+    def available(self):
+        assert len(selection()) > 0, "Select one or more nodes"
+
+    def execute(self):
+        project_path = GetProjectPath()
+        pre_render_folder = GetPreRenderFolder(project_path)
+
+        if not pre_render_folder:
+            status("Unable to determine pre render folder. Please save the project first.")
+            return
+
+        silhouette_shapes_folder = os.path.join(pre_render_folder, "Silhouette shapes")
+        if not os.path.exists(silhouette_shapes_folder):
+            os.makedirs(silhouette_shapes_folder)  # Create the 'Silhouette shapes' folder if it doesn't exist
+
+        # Create a folder with the current date within 'Silhouette shapes' folder
+        current_date_folder = datetime.datetime.now().strftime("%d-%m-%Y")
+        current_date_path = os.path.join(silhouette_shapes_folder, current_date_folder)
+        if not os.path.exists(current_date_path):
+            os.makedirs(current_date_path)
+
+        sel = selection()
+        if len(sel) == 0:
+            status("Select some shapes before trying to export!")
+        else:
+            if self.export_type == ExportType.SEPARATE_LAYERS:
+                self.export_separate_layers(current_date_path, sel)
+            elif self.export_type == ExportType.SINGLE_FILE:
+                self.export_single_file(current_date_path, sel)
+
+    def export_separate_layers(self, current_date_path, sel):
+        module = io_modules["Silhouette Shapes"]
+        for shape in sel:
+            self.counter += 1
+            try:
+                layer_name = shape.label
+            except AttributeError:
+                layer_name = "Unknown"
+
+            name = f"{layer_name}"
+            ext = ".fxs"
+            shape_path = os.path.join(current_date_path, name + ext)
+
+            # Check if the file already exists
+            file_counter = 0
+            while os.path.exists(shape_path):
+                file_counter += 1
+                name = f"{layer_name}_{file_counter:02d}"
+                shape_path = os.path.join(current_date_path, name + ext)
+
+            select([shape])
+
+            module.export(shape_path)
+
+            status(f"Silhouette Shape from layer '{layer_name}' exported to {shape_path}")
+
+    def export_single_file(self, current_date_path, sel):
+        module = io_modules["Silhouette Shapes"]
+
+        # Combine all shapes into a single shape
+        combined_shape = ShapeManager()
+        for shape in sel:
+            combined_shape.add(shape)
+
+        # Open a dialog box to get the user input for the file name
+        file_name, ok_pressed = QInputDialog.getText(None, "Enter File Name", "File Name:", text="Combined_Shape")
+
+        if ok_pressed and file_name:
+            # Set the path for the combined shape using the user-provided file name
+            combined_path = os.path.join(current_date_path, f"{file_name}.fxs")
+
+            # Check if the file already exists
+            file_counter = 0
+            while os.path.exists(combined_path):
+                file_counter += 1
+                combined_path = os.path.join(current_date_path, f"{file_name}_{file_counter:02d}.fxs")
+
+            # Export the combined shape
+            module.export(combined_path)  # Assuming module.export() supports the default Shape selection
+            status(f"Combined Silhouette Shapes exported to {combined_path}")
+        else:
+            status("Export canceled. Please provide a valid file name.")
+
+    def get_widgets(self):
+        widgets = QtWidgets.QApplication.allWidgets()
+        plist = []
+        for w in widgets:
+            try:
+                # Look for the correct place (viewer)
+                if w.parent() and w.parent().layout() and w.parent().layout().count() > 10 and w.parent() not in plist:
+                    plist.append(w.parent())
+                    for n in range(0, w.parent().layout().count()):
+                        try:
+                            x = w.parent().layout().itemAt(n).widget().text()
+                            if x == "Gamma":
+                                btn = QtWidgets.QPushButton("SE")
+                                w.parent().layout().addWidget(btn)
+                                btn.mouseReleaseEvent = self.handleMouseReleaseEvent  # Replace the default mouseReleaseEvent with custom handler
+                        except AttributeError:
+                            pass  # Ignore if the widget doesn't have a 'text' attribute
+            except AttributeError:
+                pass  # Ignore if the widget doesn't have a 'layout' attribute
+
+    def handleMouseReleaseEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton:
+            self.export_type = ExportType.SEPARATE_LAYERS
+            self.execute()
+        elif event.button() == QtCore.Qt.RightButton:
+            self.export_type = ExportType.SINGLE_FILE
+            self.execute()
+        elif event.button() == QtCore.Qt.MiddleButton:
+            self.openFolderContextMenu()
+        else:
+            super().mouseReleaseEvent(event)
+
+    def openFolderContextMenu(self):
+        folder_path = self.getFolderForExport()
+        if folder_path:
+            os.system(f"explorer {folder_path}")  # Open the folder in File Explorer
+
+    def getFolderForExport(self):
+        project_path = GetProjectPath()
+        pre_render_folder = GetPreRenderFolder(project_path)
+
+        if not pre_render_folder:
+            return None
+
+        silhouette_shapes_folder = os.path.join(pre_render_folder, "Silhouette shapes")
+        current_date_folder = datetime.datetime.now().strftime("%d-%m-%Y")
+        current_date_path = os.path.join(silhouette_shapes_folder, current_date_folder)
+
+        return current_date_path
+
+# Assuming addAction is defined elsewhere
+addAction(ExportSilhouetteShapes())
